@@ -1,0 +1,233 @@
+---
+title: "PML Course Project"
+author: "H. Berg"
+date: "July 23, 2015"
+output: html_document
+---
+
+## Executive Summary
+
+The goal of this project is to predict the manner in which the study participants did the weight lifting exercise.  This report describes how the prediction model was built, how cross-validation was used, the expected out-of-sample error, and why choices were made during model construction.  The final model chosen was Random Forest, with 43 predictors in the training dataset, 11 of which were the most significant (measured in top 50% quantile).  While the model developed was very accurate and predicted the test cases 100% correctly, this suggests a less-complex model could potentially be developed upon further exploration of the variables and the resulting prediction accuracy. 
+
+## Data Load and Exploration
+
+
+```{r dataload, echo=FALSE, message=FALSE, warning=FALSE, eval=-1}
+
+# set subdirectory to pml , if not already there
+if (grep("pml", getwd()) != 1) {
+setwd("pml")  
+}
+
+#The training data for this project are available here if not in working dir: 
+if (file.exists("train.csv") == FALSE) {
+train.source <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(train.source, 
+               destfile = "train.csv", method = "curl")
+}
+dftrain.whole <- read.csv("train.csv")
+
+# This is the provided test data with only 20 observations
+# The test data are available here if not in working dir: 
+if (file.exists("test.csv") == FALSE) {
+test.source <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(test.source, 
+               destfile = "test.csv", method = "curl")
+}
+dftest.proj <- read.csv("test.csv")
+
+# This is a temp test dataset built from the initial train dataset
+require(caret)
+set.seed(2015)
+inTrain <- createDataPartition(y=dftrain.whole$classe, p=.80, list=FALSE)
+dftrain <- dftrain.whole[inTrain,]
+dftest <- dftrain.whole[-inTrain,]
+
+```
+
+The training and testing datasets were downloaded from the url provided.   The training dataset was then split 60/40 training/testing to provide a validation dataset which was separate from the 'real' test data.  This was done in order to provide a preliminary validation method for early model building.  After models were generated and tuned, the training data was re-split using 80/20 training/testing for additional validation.  
+
+For early data exploration a table was built with classification by user to see if the data was evenly distributed across the participants.  It was noted that Jeremy and Adelmo had the most correct classifications, which may introduce bias into the model.
+
+```{r dataexplore1, echo=FALSE}
+
+s.dftrain <- summary(dftrain)
+
+# Table of results by user
+t <- table(dftrain$classe, dftrain$user) #result by user
+t
+```
+
+The data was also explored by classification result ("A" - "E") to examine variability.  It was noted that class "A" had the most data to train in the training sample, which indicates the other classes may be more difficult to train.   The two tables are below:
+
+```{r dataexplore2, echo=FALSE}
+
+# Look at distribution of A, B, C, D, E 
+rs <- rowSums(t)
+rs.pc <- round(rs/sum(rs) * 100, 2) #total percentage of each result
+rs.pc
+
+# Category A has the most data to train.  Followed by B, E, C, and D
+```
+
+## Data cut and pre-process
+
+The approach was to first pre-process the data to remove extraneous variables that will likely not be significant predictors. Removed were the variables that have numerous NA's or blanks, since missing data will not advance the prediction method.  If greater than 20% NA or blank, the variable was removed. The resulting training data frame had 59 variables.  Several models were fit with this training set -- Partial Least Squares, Random Forest, and Boosting.  
+
+It was noted that with Random Forest and Boosting the models were predicting at 100%, which was a sign of overfitting.  It was reasonable to expect that many of the sensor data could be related to each other, leading to the overfitting.  Upon further examination of the data, additional variables with either little variability or relatedness were removed --   X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, and num_window.  All of the body-attached x, y, and z gyros variables were also removed since they had little variability and most likely were already considered in the roll, pitch, and yaw variables (collinearity).  This resulted in a training data set with 43 variables.  
+
+Random Forest methods also force each split to consider only a subset of predictors, decorrelating the trees, thereby making the average of the resulting trees more reliable.  The final model used predictor subset size *m*=2, which is typically helpful when there is a large number of correlated predictors. 
+
+
+```{r cutandpreprocess, echo=FALSE}
+
+dftrain.pred <- dftrain #initialize prediction df
+
+# remove variables with excessive NA 
+
+index.na <- 0 #initialize variable to 0
+for (i in 1:length(dftrain)) {
+  if (sum(is.na(dftrain[i])) > .2*nrow(dftrain))
+    index.na <- c(index.na, i) 
+  }
+
+if (length(index.na) > 1) {
+  index.na <- index.na[-1] #remove initial value of 0
+  dftrain.pred <- dftrain[, -index.na]
+}
+
+# From df resulting above, remove variables that are primarily blank
+index.nab <- 0 #initialize variable to 0
+for (i in 1:length(dftrain.pred)) {
+  if (sum(dftrain.pred[i] == "") > .2*nrow(dftrain.pred))
+    index.nab <- c(index.nab, i) 
+  }
+
+if (length(index.nab) > 1) {
+  index.nab <- index.nab[-1] #remove initial value of 0
+  dftrain.pred <- dftrain.pred[, -index.nab]
+}
+
+# Copy train df to further prune the training variables
+dftrain.pred.2 <- dftrain.pred
+
+# Taking out variables reduce bias.
+dftrain.pred.2$X <- NULL
+dftrain.pred.2$user_name <- NULL
+dftrain.pred.2$raw_timestamp_part_1 <- NULL
+dftrain.pred.2$raw_timestamp_part_2 <- NULL
+dftrain.pred.2$cvtd_timestamp <- NULL
+dftrain.pred.2$new_window <- NULL
+dftrain.pred.2$num_window <- NULL
+
+# also remove gyros variables x,y, and z on user's body due to over-fitting
+# keeping total acceleration from accelerometer
+#dftrain.pred.2$gyros_dumbell_x <- NULL
+#dftrain.pred.2$gyros_dumbell_y <- NULL
+#dftrain.pred.2$gyros_dumbell_z <- NULL
+dftrain.pred.2$gyros_arm_x <- NULL
+dftrain.pred.2$gyros_arm_y <- NULL
+dftrain.pred.2$gyros_arm_z <- NULL
+dftrain.pred.2$gyros_belt_x <- NULL
+dftrain.pred.2$gyros_belt_y <- NULL
+dftrain.pred.2$gyros_belt_z <- NULL
+dftrain.pred.2$gyros_forearm_x <- NULL
+dftrain.pred.2$gyros_forearm_y <- NULL
+dftrain.pred.2$gyros_forearm_z <- NULL
+
+```
+
+## Model Selection
+
+We started with a partial least squares method since that was explained well in the caret tutorial -- it is dual use for regression and classification. Initially set tuneLength to 15 -- the model was sebsequently run several different times until it was determined that a tuneLength of 25 provided the best result with more components providing only marginal improvement.  Repeated cross-validation with 10 folds repeated 3 times was selected and also pre-processing the predictors with "center" and "scale". 
+
+Linear regression doesn't fit for this analysis since the result is a classification, hence it was not explored.  
+
+```{r train1, echo=TRUE, message=FALSE, warning=FALSE}
+
+set.seed(2015)
+ctrl <- trainControl(method="repeatedcv", repeats=3, classProbs=TRUE)
+
+##------------------------------------------------------------
+## Load saved models (if available) to circumvent re-running for knitr compile
+## Note to reproducers of this study -- this saves time for repeated re-runs 
+
+if(file.exists("plsModel.Rda")){
+  load("plsModel.Rda")} else {
+plsfit.model2 <- train(classe~., data=dftrain.pred.2, method="pls", tuneLength=25, trControl=ctrl, preProc=c("center", "scale"))
+}
+##------------------------------------------------------------
+
+# Run against validation dataset to get accuracy rate
+plsClasses2 <- predict(plsfit.model2, newdata=dftest)
+plsCm2 <- confusionMatrix(data=plsClasses2, dftest$classe)
+
+plot(plsfit.model2$finalModel) #plots model results
+# plsfit.model2  #model details
+plsCm2
+
+```
+
+The PLS model predicted reasonably well class "A", where more training data was available.  As can be seen in the statistics above, across all classes the positive predicive value was quite low, and the negative predictive value above 90%.  The overall Accuracy metric was reported at 67.4%, with 95% CI (0.6591, 0.6886).   
+
+To improve results, next run was the Random Forest model.  It was also run with repeated cross-validation (10 folds repeated 3 times) and pre-processing the predictors with "center" and "scale".  The results of the model fit are below.
+
+```{r rfmodel, echo=TRUE, message=FALSE, warning=FALSE}
+
+#------------------------------
+# This is the model that produces the best result
+# Check error rate to explain why it is the best model
+
+set.seed(2015)
+ctrl <- trainControl(method="repeatedcv", repeats=3, classProbs=TRUE)
+
+##------------------------------------------------------------
+## Load saved models (if available) to circumvent re-running for knitr compile
+## Note to reproducers of this study -- this saves times for repeated re-runs.
+## NOTE -- THIS MODEL MAY TAKE 7+ HOURS TO EXECUTE DEPENDING ON THE SPEED OF YOUR ENVIRONMENT.  THE MODEL ITSELF IS 1.9 GB.
+
+if(file.exists("rfModel.Rda")){
+  load("rfModel.Rda")} else {
+rffit2 <- train(classe~., data=dftrain.pred.2, method="rf", trControl=ctrl, preProc=c("center", "scale"), prox=TRUE) 
+}
+##------------------------------------------------------------
+
+# Run against test data to get out-of-sample error rate
+rfClasses2 <- predict(rffit2, newdata=dftest)
+rfCm2 <- confusionMatrix(data=rfClasses2, dftest$classe)
+
+trellis.par.set(caretTheme())
+plot(rffit2$finalModel) #plots the error rate in the final model
+rffit2 #model details
+rfCm2
+#-----------------------------------
+```
+
+A Boost model was also fit with model "adaBoost.M1".  The inital model was run before the data was sufficiently pruned so it resulted in an over-fitted model.  The results were very similar to the original Random Forest model (which was also over-fitted).  
+
+Upon review of all the model results the pruned Random Forest Model was selected as the best fit for this analysis.  Second choice would be the Boost model. 
+
+
+### Estimation of Out-of-Sample Error Rates, Model Tuning, and Important Predictors
+
+The Accuracy metric for the optimal model against the validation data was .992 with *mtry* = 2.  It is difficult to determine if the Accuracy metric will hold true for the out-of-sample test data, however, since typically the variability in the validation data is much lower than the variability in the "real" test data. However, with *mtry* = 2, this allows for a significant amount of variability in the method.  
+
+With 10-fold 3-repeat cross-validation performed, there were few mis-classed observations in the validation set, and Sensitivity and Specificity are both in the 98% - 99% range. 
+
+Given the analysis above, we concluded that the out-of-sample error rate will be very similar to the validation dataset (.992).  
+
+The following plot shows the predictors in the model by importance. Of the 43 predictors, 11 were in the top 50% quantile.  
+
+```{r toppredict, echo=FALSE}
+varImpPlot(rffit2$finalModel)
+```
+
+## Project Out-of-Sample Test
+
+The Random Forest model was then run against the provided test data of 20 observations.  All predictions were correct.  The results are below:
+
+```{r finaltest, echo=TRUE, eval=TRUE}
+answ.rf.proj <- predict(rffit2, newdata=dftest.proj)
+answ.rf.proj
+```
+
